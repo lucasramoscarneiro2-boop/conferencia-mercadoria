@@ -96,6 +96,121 @@ def get_conn():
     )
 
 # ==========================================================
+# FUNÇÕES AUXILIARES DE BANCO (AUTO-SAVE POR CONTAGEM)
+# ==========================================================
+def obter_ou_criar_conferencia(viagem: str, loja: str, data_viagem_str: str):
+    """
+    Busca a conferência mais recente para (viagem, loja, data_viagem).
+    Se não existir, cria um novo registro e retorna o id.
+    Usado para auto-salvar a cada contagem.
+    """
+    data_viagem = parse_data_viagem(data_viagem_str)
+    conn = get_conn()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    select id
+                    from public.conferencias_viagem
+                    where viagem = %s
+                      and loja = %s
+                      and (data_viagem is not distinct from %s)
+                    order by id desc
+                    limit 1;
+                """, (viagem, loja, data_viagem))
+                row = cur.fetchone()
+                if row:
+                    return row[0]
+
+                # Não existe → cria
+                cur.execute("""
+                    insert into public.conferencias_viagem (
+                        viagem, loja, data_viagem, arquivo_origem
+                    ) values (%s, %s, %s, %s)
+                    returning id;
+                """, (viagem, loja, data_viagem, None))
+                conferencia_id = cur.fetchone()[0]
+                return conferencia_id
+    finally:
+        conn.close()
+
+def carregar_itens_conferencia(conferencia_id: int) -> pd.DataFrame:
+    """
+    Carrega itens já registrados no banco para essa conferência (auto-salvos).
+    """
+    conn = get_conn()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    select codigo, descricao, qtd_prevista, qtd_contada
+                    from public.conferencias_viagem_itens
+                    where conferencia_id = %s;
+                """, (conferencia_id,))
+                rows = cur.fetchall()
+                if not rows:
+                    return pd.DataFrame(columns=["codigo", "descricao", "qtd_prevista", "qtd_contada"])
+                return pd.DataFrame(rows, columns=["codigo", "descricao", "qtd_prevista", "qtd_contada"])
+    finally:
+        conn.close()
+
+def calcular_status_db(qtd_prevista: int, qtd_contada: int) -> str:
+    diferenca = qtd_contada - qtd_prevista
+    if qtd_prevista == 0 and qtd_contada > 0:
+        return "SOBRANDO (não estava na planilha)"
+    if diferenca == 0:
+        return "OK"
+    elif diferenca > 0:
+        return "SOBRANDO"
+    else:
+        return "FALTANDO"
+
+def registrar_contagem_db(conferencia_id: int, codigo: str, descricao: str,
+                          qtd_prevista: int, qtd_add: int):
+    """
+    Atualiza ou insere o item da conferência no banco, somando a quantidade contada.
+    Chamada a cada contagem lançada (auto-save).
+    """
+    conn = get_conn()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # Verifica se já existe registro desse código
+                cur.execute("""
+                    select id, qtd_contada
+                    from public.conferencias_viagem_itens
+                    where conferencia_id = %s
+                      and codigo = %s;
+                """, (conferencia_id, codigo))
+                row = cur.fetchone()
+                if row:
+                    item_id, qtd_atual = row
+                    nova_qtd = int((qtd_atual or 0) + qtd_add)
+                    diferenca = nova_qtd - int(qtd_prevista)
+                    status = calcular_status_db(int(qtd_prevista), nova_qtd)
+                    cur.execute("""
+                        update public.conferencias_viagem_itens
+                        set qtd_contada = %s,
+                            qtd_prevista = %s,
+                            diferenca = %s,
+                            status = %s
+                        where id = %s;
+                    """, (nova_qtd, int(qtd_prevista), diferenca, status, item_id))
+                else:
+                    nova_qtd = int(qtd_add)
+                    diferenca = nova_qtd - int(qtd_prevista)
+                    status = calcular_status_db(int(qtd_prevista), nova_qtd)
+                    cur.execute("""
+                        insert into public.conferencias_viagem_itens (
+                            conferencia_id, codigo, descricao,
+                            qtd_prevista, qtd_contada, diferenca, status
+                        ) values (%s, %s, %s, %s, %s, %s, %s);
+                    """, (conferencia_id, codigo, descricao,
+                          int(qtd_prevista), nova_qtd, diferenca, status))
+    finally:
+        conn.close()
+
+# ==========================================================
 # FUNÇÃO PARA LER A PLANILHA NO FORMATO REAL DA LOJA
 # ==========================================================
 def carregar_planilha_nf(uploaded_file):
@@ -230,6 +345,8 @@ if "meta_data" not in st.session_state:
     st.session_state.meta_data = None
 if "camera_ativa" not in st.session_state:
     st.session_state.camera_ativa = False  # <-- estado do leitor de câmera
+if "conferencia_id" not in st.session_state:
+    st.session_state.conferencia_id = None  # <-- id da conferência no banco para autosave
 
 # ==========================================================
 # 1. UPLOAD DA PLANILHA
@@ -256,13 +373,48 @@ if arquivo is not None and st.session_state.df_nf is None:
         st.stop()
 
     st.session_state.df_nf = df_nf
-    st.session_state.meta_viagem = meta_viagem
-    st.session_state.meta_loja = meta_loja
-    st.session_state.meta_data = meta_data
+    st.session_state.meta_viagem = meta_viagem or "N/D"
+    st.session_state.meta_loja = meta_loja or "N/D"
+    st.session_state.meta_data = meta_data or "N/D"
 
-    # DataFrame de conferência começa com qtd_contada = 0
+    # ======================================================
+    # AQUI: CRIA OU REAPROVEITA CONFERÊNCIA NO BANCO (AUTO-SAVE)
+    # ======================================================
+    conferencia_id = obter_ou_criar_conferencia(
+        st.session_state.meta_viagem,
+        st.session_state.meta_loja,
+        st.session_state.meta_data
+    )
+    st.session_state.conferencia_id = conferencia_id
+
+    # Carrega itens já existentes no banco para essa conferência (se houver)
+    df_itens_db = carregar_itens_conferencia(conferencia_id)
+
+    # DataFrame base da NF
     df_conf = df_nf.copy()
-    df_conf["qtd_contada"] = 0
+
+    if df_itens_db.empty:
+        # Nenhuma contagem anterior → começa em zero
+        df_conf["qtd_contada"] = 0
+    else:
+        # Merge NF com o que já foi contado
+        merge = df_nf.merge(
+            df_itens_db[["codigo", "qtd_contada"]],
+            on="codigo",
+            how="left"
+        )
+        df_conf["qtd_contada"] = merge["qtd_contada"].fillna(0).astype(int)
+
+        # Itens que existem no banco mas não estão na NF → itens sobrando
+        codigos_nf = set(df_nf["codigo"])
+        df_extra = df_itens_db[~df_itens_db["codigo"].isin(codigos_nf)].copy()
+        if not df_extra.empty:
+            df_extra["qtd_prevista"] = 0
+            df_conf = pd.concat(
+                [df_conf, df_extra[["codigo", "descricao", "qtd_prevista", "qtd_contada"]]],
+                ignore_index=True
+            )
+
     if "codigo_original" not in df_conf.columns:
         df_conf["codigo_original"] = df_conf["codigo"]
 
@@ -274,6 +426,7 @@ if st.session_state.df_nf is None:
 
 df_nf = st.session_state.df_nf
 df_conf = st.session_state.df_conferencia
+conferencia_id = st.session_state.conferencia_id
 
 # ==========================================================
 # CABEÇALHO DA VIAGEM / LOJA / DATA
@@ -285,7 +438,8 @@ data_v_str = st.session_state.meta_data or "N/D"
 st.markdown(
     f"**Viagem:** `{viagem}` &nbsp;&nbsp;|&nbsp;&nbsp; "
     f"**Loja:** `{loja}` &nbsp;&nbsp;|&nbsp;&nbsp; "
-    f"**Data:** `{data_v_str}`"
+    f"**Data:** `{data_v_str}` &nbsp;&nbsp;|&nbsp;&nbsp; "
+    f"**ID Conferência (auto-save):** `{conferencia_id}`"
 )
 
 with st.expander("👁️ Visualizar itens da NF (base para conferência)", expanded=False):
@@ -404,13 +558,12 @@ if st.session_state.camera_ativa:
                 }
             },
             locator: {
-                patchSize: "medium", // x-small, small, medium, large, x-large
+                patchSize: "medium",
                 halfSample: true
             },
             numOfWorkers: (navigator.hardwareConcurrency || 4),
             frequency: 10,
             decoder: {
-                // foca em EAN primeiro
                 readers: [
                     "ean_reader",
                     "ean_8_reader"
@@ -442,7 +595,6 @@ if st.session_state.camera_ativa:
             updateLastCode(code);
             setCodigoNoInput(code);
 
-            // evita múltiplas leituras em sequência
             setTimeout(function() { lastCode = ""; }, 1500);
         });
     }
@@ -459,7 +611,7 @@ if st.session_state.camera_ativa:
     )
 
 # ==========================================================
-# 2.x PROCESSAMENTO DA CONTAGEM (MANUAL OU CÂMERA)
+# 2.x PROCESSAMENTO DA CONTAGEM (MANUAL OU CÂMERA) + AUTO-SAVE
 # ==========================================================
 if confirmar and codigo_digitado.strip() != "":
 
@@ -468,8 +620,21 @@ if confirmar and codigo_digitado.strip() != "":
     mask = df_conf["codigo"] == codigo_digitado_norm
     if mask.any():
         idx = df_conf[mask].index[0]
+        # Atualiza em memória
         st.session_state.df_conferencia.loc[idx, "qtd_contada"] += int(qtd_lida)
         produto = df_conf.loc[idx, "descricao"]
+        qtd_prevista = int(df_conf.loc[idx, "qtd_prevista"])
+
+        # AUTO-SAVE NO BANCO
+        if conferencia_id is not None:
+            registrar_contagem_db(
+                conferencia_id=conferencia_id,
+                codigo=codigo_digitado_norm,
+                descricao=produto,
+                qtd_prevista=qtd_prevista,
+                qtd_add=int(qtd_lida)
+            )
+
         st.success(f"Contagem adicionada para: {produto}")
     else:
         # Não estava na planilha → sobra
@@ -485,6 +650,17 @@ if confirmar and codigo_digitado.strip() != "":
             [st.session_state.df_conferencia, nova_linha],
             ignore_index=True
         )
+
+        # AUTO-SAVE NO BANCO PARA ITEM SOBRANDO
+        if conferencia_id is not None:
+            registrar_contagem_db(
+                conferencia_id=conferencia_id,
+                codigo=codigo_digitado_norm,
+                descricao="NÃO CADASTRADO NA PLANILHA",
+                qtd_prevista=0,
+                qtd_add=int(qtd_lida)
+            )
+
         st.warning("Código não estava na planilha. Incluído como item SOBRANDO (qtd_prevista = 0).")
 
     # Atualiza referência local
@@ -619,7 +795,7 @@ st.download_button(
 )
 
 # ==========================================================
-# 6. SALVAR CONFERÊNCIA NO SUPABASE
+# 6. SALVAR CONFERÊNCIA NO SUPABASE (SNAPSHOT FINAL)
 # ==========================================================
 st.markdown("### 💾 Salvar conferência desta viagem")
 
@@ -638,6 +814,8 @@ def parse_data_viagem(data_str: str):
     return None
 
 def salvar_conferencia_supabase(df_resultado: pd.DataFrame, viagem: str, loja: str, data_viagem_str: str):
+    # Mantido do seu código: essa função gera um SNAPSHOT completo,
+    # inserindo um novo registro de conferência e todos os itens.
     data_viagem = parse_data_viagem(data_viagem_str)
 
     conn = get_conn()
