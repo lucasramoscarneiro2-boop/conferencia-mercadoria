@@ -4,6 +4,7 @@ import io
 from datetime import datetime
 import psycopg2
 from psycopg2.extras import execute_values
+import streamlit.components.v1 as components  # <-- ADICIONADO: para usar HTML/JS (câmera)
 
 # ==========================================================
 # CONFIG STREAMLIT
@@ -227,6 +228,8 @@ if "meta_loja" not in st.session_state:
     st.session_state.meta_loja = None
 if "meta_data" not in st.session_state:
     st.session_state.meta_data = None
+if "camera_ativa" not in st.session_state:
+    st.session_state.camera_ativa = False  # <-- estado do leitor de câmera
 
 # ==========================================================
 # 1. UPLOAD DA PLANILHA
@@ -316,6 +319,118 @@ with col2:
 with col3:
     confirmar = st.button("➕ Adicionar à contagem")
 
+# ==========================================================
+# 2.1 LEITOR POR CÂMERA (OPCIONAL, VIA QUAGGAJS)
+# ==========================================================
+st.markdown("### 📸 Leitura por câmera (opcional)")
+
+cam_col1, cam_col2 = st.columns([1, 3])
+with cam_col1:
+    if st.button("📸 Ativar câmera para leitura"):
+        st.session_state.camera_ativa = True
+
+if st.session_state.camera_ativa:
+    components.html(
+        """
+<div style="border:1px solid #ccc; border-radius: 10px; padding:8px; margin-bottom:8px;">
+  <div id="interactive" class="viewport" style="width:100%; text-align:center;">
+    <video autoplay="true" preload="auto" playsinline="true" style="width:100%; border-radius:10px;"></video>
+  </div>
+  <p style="font-size: 13px; color: #555; margin-top:4px;">
+    Aponte a câmera para o código de barras. Ao ler, o código será preenchido automaticamente no campo de código.
+  </p>
+</div>
+
+<script src="https://unpkg.com/quagga/dist/quagga.min.js"></script>
+<script>
+(function() {
+    if (window._quaggaStarted) {
+        return;
+    }
+    window._quaggaStarted = true;
+
+    function setCodigoNoInput(code) {
+        try {
+            // Procura o input do Streamlit pelo aria-label
+            const inputs = window.parent.document.querySelectorAll('input');
+            for (const inp of inputs) {
+                const aria = inp.getAttribute('aria-label');
+                if (aria === 'Código (SAP por enquanto, futuramente EAN)') {
+                    inp.value = code;
+                    inp.dispatchEvent(new Event('input', { bubbles: true }));
+                    // Beep no pai, se existir
+                    if (window.parent.playBeep) {
+                        window.parent.playBeep();
+                    }
+                    break;
+                }
+            }
+        } catch (e) {
+            console.log("Erro ao setar código no input:", e);
+        }
+    }
+
+    function startScanner() {
+        const target = document.querySelector('#interactive');
+        if (!target) {
+            console.log("Container de câmera não encontrado.");
+            return;
+        }
+
+        Quagga.init({
+            inputStream: {
+                name: "Live",
+                type: "LiveStream",
+                target: target,
+                constraints: {
+                    facingMode: "environment"
+                }
+            },
+            decoder: {
+                readers: [
+                    "ean_reader",
+                    "ean_8_reader",
+                    "upc_reader",
+                    "upc_e_reader",
+                    "code_128_reader",
+                    "code_39_reader",
+                    "code_39_vin_reader"
+                ]
+            },
+            locate: true
+        }, function(err) {
+            if (err) {
+                console.log("Erro ao iniciar Quagga:", err);
+                return;
+            }
+            Quagga.start();
+            console.log("Quagga iniciado.");
+        });
+
+        let lastCode = "";
+        Quagga.onDetected(function(data) {
+            if (!data || !data.codeResult || !data.codeResult.code) return;
+            const code = data.codeResult.code;
+            if (code === lastCode) return;
+            lastCode = code;
+            console.log("Código detectado:", code);
+            setCodigoNoInput(code);
+
+            // Opcional: evita múltiplas leituras em sequência
+            setTimeout(function() { lastCode = ""; }, 1500);
+        });
+    }
+
+    document.addEventListener("DOMContentLoaded", startScanner);
+})();
+</script>
+        """,
+        height=350
+    )
+
+# ==========================================================
+# 2.x PROCESSAMENTO DA CONTAGEM (MANUAL OU CÂMERA)
+# ==========================================================
 if confirmar and codigo_digitado.strip() != "":
 
     codigo_digitado_norm = codigo_digitado.strip().lstrip("0")
@@ -345,7 +460,7 @@ if confirmar and codigo_digitado.strip() != "":
     # Atualiza referência local
     df_conf = st.session_state.df_conferencia
 
-    # 🔊 Beep de confirmação da leitura
+    # 🔊 Beep de confirmação da leitura (caso venha do leitor físico/manual)
     st.markdown("<script>window.playBeep && window.playBeep();</script>", unsafe_allow_html=True)
 
 # ==========================================================
