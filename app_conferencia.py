@@ -15,7 +15,44 @@ st.set_page_config(
     page_icon="📦"
 )
 
-st.title("📦 Sistema de Conferência de Mercadorias")
+# 🔒 Esconde elementos padrão do Streamlit e ajusta fundo / padding
+st.markdown("""
+<style>
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+header {visibility: hidden;}
+.main {
+    background-color: #f5f5f7;
+}
+.block-container {
+    padding-top: 1.2rem;
+    padding-bottom: 2rem;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# 🧾 Cabeçalho profissional
+st.markdown("""
+<div style="
+    background: linear-gradient(90deg, #111827, #1f2933);
+    padding: 18px 24px;
+    border-radius: 12px;
+    margin-bottom: 18px;
+">
+  <div style="display:flex;align-items:center;gap:10px;">
+    <span style="font-size: 22px;">📦</span>
+    <div>
+      <h2 style="color:#f9fafb;margin:0;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+        Sistema de Conferência de Mercadorias
+      </h2>
+      <p style="color:#d1d5db;margin:4px 0 0 0;font-size:13px;">
+        Registro de contagens por viagem, com controle de faltas e sobras integrado ao banco de dados.
+      </p>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
 
 # ==========================================================
 # ALERTA DE SAIR SEM SALVAR
@@ -94,6 +131,20 @@ def get_conn():
         password=cfg["password"],
         sslmode=cfg.get("sslmode", "require")
     )
+
+def parse_data_viagem(data_str: str):
+    """
+    Converte '25-11-2025' ou '25/11/2025' em datetime.date.
+    Se não conseguir, retorna None.
+    """
+    if not data_str or data_str in ["N/D", "Não informado"]:
+        return None
+    for fmt in ("%d-%m-%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(data_str, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 # ==========================================================
 # FUNÇÕES AUXILIARES DE BANCO (AUTO-SAVE POR CONTAGEM)
@@ -799,19 +850,6 @@ st.download_button(
 # ==========================================================
 st.markdown("### 💾 Salvar conferência desta viagem")
 
-def parse_data_viagem(data_str: str):
-    """
-    Converte '25-11-2025' ou '25/11/2025' em datetime.date.
-    Se não conseguir, retorna None.
-    """
-    if not data_str or data_str == "N/D":
-        return None
-    for fmt in ("%d-%m-%Y", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(data_str, fmt).date()
-        except ValueError:
-            continue
-    return None
 
 def salvar_conferencia_supabase(df_resultado: pd.DataFrame, viagem: str, loja: str, data_viagem_str: str):
     # Mantido do seu código: essa função gera um SNAPSHOT completo,
