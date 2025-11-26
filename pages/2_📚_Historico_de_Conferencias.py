@@ -16,7 +16,7 @@ st.set_page_config(
 st.title("📚 Histórico de Conferências de Viagens")
 
 st.markdown("""
-Aqui você consegue consultar todas as conferências já **salvas no Supabase**:
+Aqui você consegue consultar todas as conferências já **salvas**:
 
 - Filtrar por **loja**, **viagem** e período de data
 - Ver o resumo de cada conferência
