@@ -16,11 +16,67 @@ st.set_page_config(
 
 st.title("📦 Sistema de Conferência de Mercadorias")
 
+# ==========================================================
+# ALERTA DE SAIR SEM SALVAR
+# ==========================================================
+
+# Controla se a conferência já foi salva
+if "conferencia_salva" not in st.session_state:
+    st.session_state.conferencia_salva = False
+
+# Script JS — alerta ao tentar sair
+alerta_js = """
+<script>
+window.addEventListener("beforeunload", function (e) {
+    // Só alerta se ainda não foi salvo
+    if (window.conferencia_salva !== true) {
+        e.preventDefault();
+        e.returnValue = '';
+        return '';
+    }
+});
+</script>
+"""
+
+# Injeta variável JS responsável
+st.markdown(f"""
+<script>
+window.conferencia_salva = {str(st.session_state.conferencia_salva).lower()};
+</script>
+""", unsafe_allow_html=True)
+
+# Injeta o alerta na página
+st.markdown(alerta_js, unsafe_allow_html=True)
+
+# ==========================================================
+# JS PARA BEEP DO LEITOR (ÁUDIO DE CONFIRMAÇÃO)
+# ==========================================================
+st.markdown("""
+<script>
+window.playBeep = function() {
+    try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const oscillator = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        oscillator.type = "sine";
+        oscillator.frequency.setValueAtTime(900, ctx.currentTime);
+        gainNode.gain.setValueAtTime(0.1, ctx.currentTime);  // volume baixo
+        oscillator.connect(gainNode);
+        gainNode.connect(ctx.destination);
+        oscillator.start();
+        oscillator.stop(ctx.currentTime + 0.08);  // beep curto
+    } catch (e) {
+        console.log("AudioContext error: ", e);
+    }
+};
+</script>
+""", unsafe_allow_html=True)
+
 st.markdown("""
 1. Anexe a **planilha de conferência** (igual a usada na loja).  
 2. O conferente digita ou escaneia o **código SAP** (futuramente EAN) e informa a **quantidade conferida**.  
 3. O sistema soma as contagens por item e gera um **relatório de OK / Faltando / Sobrando**.  
-4. No final, clique em **“Salvar conferência desta viagem no Supabase”** para gravar o histórico.
+4. No final, clique em **“Salvar conferência desta viagem”** para gravar o histórico.
 """)
 
 # ==========================================================
@@ -121,13 +177,38 @@ def carregar_planilha_nf(uploaded_file):
         )
 
     df_nf = pd.DataFrame({
-        "codigo": df[col_cod_sap].astype(str).str.strip(),   # por enquanto é o CodSap
+        "codigo_original": df[col_cod_sap].astype(str).str.strip(),
+        "codigo": df[col_cod_sap].astype(str).str.lstrip("0").str.strip(),  # <- sem zeros à esquerda
         "descricao": df[col_desc].astype(str).str.strip(),
         "qtd_prevista": pd.to_numeric(df[col_qtd], errors="coerce").fillna(0).astype(int)
     })
 
-    # Remove linhas totalmente vazias de código/descrição
-    df_nf = df_nf[(df_nf["codigo"] != "") & (df_nf["descricao"] != "")]
+    # ==========================================================
+    # LIMPEZA ROBUSTA: REMOVER LINHAS INVÁLIDAS DA PLANILHA
+    # ==========================================================
+
+    # Remove NaN em código e descrição
+    df_nf = df_nf.dropna(subset=["codigo", "descricao"])
+
+    # Remove cabeçalho repetido no meio da planilha
+    df_nf = df_nf[~df_nf["codigo_original"].str.upper().str.contains("CODSAP", na=False)]
+    df_nf = df_nf[~df_nf["descricao"].str.upper().str.contains("DESCRI", na=False)]
+
+    # Remove linhas sem código (após remover zeros)
+    df_nf = df_nf[df_nf["codigo"].str.strip() != ""]
+
+    # Remove linhas onde descrição é literalmente 'nan'
+    df_nf = df_nf[df_nf["descricao"].str.lower() != "nan"]
+
+    # Remove linhas onde código é 'nan'
+    df_nf = df_nf[df_nf["codigo"].str.lower() != "nan"]
+
+    # Remove linhas em que não há quantidade prevista (linha lixo típica)
+    df_nf = df_nf[df_nf["qtd_prevista"].notna()]
+
+    # Remove linhas completamente vazias com qtd_prevista = 0 e descricao = nan
+    df_nf = df_nf[~((df_nf["qtd_prevista"] == 0) & (df_nf["descricao"].str.lower() == "nan"))]
+
     df_nf = df_nf.reset_index(drop=True)
 
     # Retorna também os metadados
@@ -156,6 +237,15 @@ arquivo = st.file_uploader(
 )
 
 if arquivo is not None and st.session_state.df_nf is None:
+
+    # Nova planilha → nova conferência → volta a exigir salvar
+    st.session_state.conferencia_salva = False
+    st.markdown("""
+    <script>
+    window.conferencia_salva = false;
+    </script>
+    """, unsafe_allow_html=True)
+
     try:
         df_nf, meta_viagem, meta_loja, meta_data = carregar_planilha_nf(arquivo)
     except Exception as e:
@@ -170,6 +260,9 @@ if arquivo is not None and st.session_state.df_nf is None:
     # DataFrame de conferência começa com qtd_contada = 0
     df_conf = df_nf.copy()
     df_conf["qtd_contada"] = 0
+    if "codigo_original" not in df_conf.columns:
+        df_conf["codigo_original"] = df_conf["codigo"]
+
     st.session_state.df_conferencia = df_conf
 
 if st.session_state.df_nf is None:
@@ -224,10 +317,10 @@ with col3:
     confirmar = st.button("➕ Adicionar à contagem")
 
 if confirmar and codigo_digitado.strip() != "":
-    codigo = codigo_digitado.strip()
 
-    # Procura o código na base
-    mask = df_conf["codigo"] == codigo
+    codigo_digitado_norm = codigo_digitado.strip().lstrip("0")
+
+    mask = df_conf["codigo"] == codigo_digitado_norm
     if mask.any():
         idx = df_conf[mask].index[0]
         st.session_state.df_conferencia.loc[idx, "qtd_contada"] += int(qtd_lida)
@@ -236,22 +329,24 @@ if confirmar and codigo_digitado.strip() != "":
     else:
         # Não estava na planilha → sobra
         nova_linha = pd.DataFrame([{
-            "codigo": codigo,
+            "codigo_original": codigo_digitado.strip(),
+            "codigo": codigo_digitado_norm,
             "descricao": "NÃO CADASTRADO NA PLANILHA",
             "qtd_prevista": 0,
             "qtd_contada": int(qtd_lida)
         }])
+
         st.session_state.df_conferencia = pd.concat(
             [st.session_state.df_conferencia, nova_linha],
             ignore_index=True
         )
         st.warning("Código não estava na planilha. Incluído como item SOBRANDO (qtd_prevista = 0).")
 
-    # Limpa para próxima leitura
-    st.session_state.input_codigo = ""
-    st.session_state.input_qtd = 1
-
+    # Atualiza referência local
     df_conf = st.session_state.df_conferencia
+
+    # 🔊 Beep de confirmação da leitura
+    st.markdown("<script>window.playBeep && window.playBeep();</script>", unsafe_allow_html=True)
 
 # ==========================================================
 # 3. PARCIAL E STATUS
@@ -283,6 +378,32 @@ st.dataframe(
         "status"
     ]],
     use_container_width=True
+)
+
+# ==========================================================
+# 3.1 BARRA DE PROGRESSO DA CONFERÊNCIA
+# ==========================================================
+st.markdown("### 📈 Progresso da conferência")
+
+total_previsto = int(df_parcial["qtd_prevista"].sum())
+total_contado = int(df_parcial["qtd_contada"].sum())
+
+if total_previsto > 0:
+    progresso = min(total_contado / total_previsto, 1.0)
+else:
+    progresso = 0.0
+
+itens_totais = len(df_parcial)
+itens_com_contagem = int((df_parcial["qtd_contada"] > 0).sum())
+
+st.progress(
+    progresso,
+    text=f"Progresso por quantidade: {total_contado}/{total_previsto} unidades conferidas"
+)
+
+st.caption(
+    f"Itens com alguma contagem: {itens_com_contagem} de {itens_totais} itens da NF "
+    f"({(itens_com_contagem / itens_totais * 100 if itens_totais else 0):.1f}%)."
 )
 
 # ==========================================================
@@ -355,7 +476,7 @@ st.download_button(
 # ==========================================================
 # 6. SALVAR CONFERÊNCIA NO SUPABASE
 # ==========================================================
-st.markdown("### 💾 Salvar conferência desta viagem no Supabase")
+st.markdown("### 💾 Salvar conferência desta viagem")
 
 def parse_data_viagem(data_str: str):
     """
@@ -411,9 +532,19 @@ def salvar_conferencia_supabase(df_resultado: pd.DataFrame, viagem: str, loja: s
     finally:
         conn.close()
 
-if st.button("💾 Salvar conferência desta viagem no Supabase"):
+if st.button("💾 Salvar conferência desta viagem"):
     try:
         conf_id = salvar_conferencia_supabase(df_parcial, viagem, loja, data_v_str)
         st.success(f"Conferência salva no Supabase com id = {conf_id}")
+
+        st.session_state.conferencia_salva = True
+
+        # Atualiza JS para não alertar mais
+        st.markdown("""
+            <script>
+            window.conferencia_salva = true;
+            </script>
+        """, unsafe_allow_html=True)
+
     except Exception as e:
         st.error(f"Erro ao salvar no Supabase: {e}")
