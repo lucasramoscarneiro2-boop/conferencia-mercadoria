@@ -319,6 +319,7 @@ with col2:
 with col3:
     confirmar = st.button("➕ Adicionar à contagem")
 
+
 # ==========================================================
 # 2.1 LEITOR POR CÂMERA (OPCIONAL, VIA QUAGGAJS)
 # ==========================================================
@@ -337,7 +338,10 @@ if st.session_state.camera_ativa:
     <video autoplay="true" preload="auto" playsinline="true" style="width:100%; border-radius:10px;"></video>
   </div>
   <p style="font-size: 13px; color: #555; margin-top:4px;">
-    Aponte a câmera para o código de barras. Ao ler, o código será preenchido automaticamente no campo de código.
+    Aponte a câmera para o código de barras (EAN). Mantenha o código bem centralizado e com boa iluminação.
+  </p>
+  <p style="font-size: 13px; color: #333; margin-top:4px;">
+    Último código lido: <strong id="last-code">Nenhum ainda</strong>
   </p>
 </div>
 
@@ -345,20 +349,19 @@ if st.session_state.camera_ativa:
 <script>
 (function() {
     if (window._quaggaStarted) {
+        console.log("Quagga já iniciado.");
         return;
     }
     window._quaggaStarted = true;
 
     function setCodigoNoInput(code) {
         try {
-            // Procura o input do Streamlit pelo aria-label
             const inputs = window.parent.document.querySelectorAll('input');
             for (const inp of inputs) {
                 const aria = inp.getAttribute('aria-label');
                 if (aria === 'Código (SAP por enquanto, futuramente EAN)') {
                     inp.value = code;
                     inp.dispatchEvent(new Event('input', { bubbles: true }));
-                    // Beep no pai, se existir
                     if (window.parent.playBeep) {
                         window.parent.playBeep();
                     }
@@ -367,6 +370,17 @@ if st.session_state.camera_ativa:
             }
         } catch (e) {
             console.log("Erro ao setar código no input:", e);
+        }
+    }
+
+    function updateLastCode(code) {
+        try {
+            const span = document.getElementById('last-code');
+            if (span) {
+                span.textContent = code || 'Nenhum ainda';
+            }
+        } catch (e) {
+            console.log("Erro ao atualizar last-code:", e);
         }
     }
 
@@ -383,49 +397,65 @@ if st.session_state.camera_ativa:
                 type: "LiveStream",
                 target: target,
                 constraints: {
-                    facingMode: "environment"
+                    facingMode: "environment",
+                    width: { min: 640 },
+                    height: { min: 480 },
+                    aspectRatio: { min: 1, max: 2 }
                 }
             },
+            locator: {
+                patchSize: "medium", // x-small, small, medium, large, x-large
+                halfSample: true
+            },
+            numOfWorkers: (navigator.hardwareConcurrency || 4),
+            frequency: 10,
             decoder: {
+                // foca em EAN primeiro
                 readers: [
                     "ean_reader",
-                    "ean_8_reader",
-                    "upc_reader",
-                    "upc_e_reader",
-                    "code_128_reader",
-                    "code_39_reader",
-                    "code_39_vin_reader"
+                    "ean_8_reader"
                 ]
             },
             locate: true
         }, function(err) {
             if (err) {
                 console.log("Erro ao iniciar Quagga:", err);
+                updateLastCode("Erro ao iniciar câmera");
                 return;
             }
             Quagga.start();
             console.log("Quagga iniciado.");
+            updateLastCode("Aguardando leitura...");
         });
 
         let lastCode = "";
         Quagga.onDetected(function(data) {
             if (!data || !data.codeResult || !data.codeResult.code) return;
             const code = data.codeResult.code;
+            if (!code) return;
+
+            console.log("Código detectado bruto:", code);
+
             if (code === lastCode) return;
             lastCode = code;
-            console.log("Código detectado:", code);
+
+            updateLastCode(code);
             setCodigoNoInput(code);
 
-            // Opcional: evita múltiplas leituras em sequência
+            // evita múltiplas leituras em sequência
             setTimeout(function() { lastCode = ""; }, 1500);
         });
     }
 
-    document.addEventListener("DOMContentLoaded", startScanner);
+    if (document.readyState === "complete" || document.readyState === "interactive") {
+        startScanner();
+    } else {
+        document.addEventListener("DOMContentLoaded", startScanner);
+    }
 })();
 </script>
         """,
-        height=350
+        height=380
     )
 
 # ==========================================================
